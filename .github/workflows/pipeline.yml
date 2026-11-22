@@ -50,7 +50,7 @@ jobs:
           ansible-galaxy collection install -r ansible/requirements.yml
 
       - name: Comprobar sintaxis de Ansible
-        run: ansible-playbook -i localhost, --syntax-check ansible/playbook.yml
+        run: ansible-playbook -u ubuntu -i localhost, --syntax-check ansible/playbook.yml
 
       - name: Instalar Chromium para Playwright
         run: npx playwright install --with-deps chromium
@@ -196,7 +196,7 @@ jobs:
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
           VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
         run: |
-          ansible-playbook -i '${{ steps.vm.outputs.ip }},' \
+          ansible-playbook -u ubuntu -i '${{ steps.vm.outputs.ip }},' \
             --private-key "$RUNNER_TEMP/vm_ssh_key" ansible/playbook.yml
 
       - name: Comprobar que DudaMapa responde en la VM
