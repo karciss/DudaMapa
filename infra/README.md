@@ -43,7 +43,7 @@ El backend remoto usa la clave `dudamapa/terraform.tfstate` dentro del bucket, s
 ## Qué ocurre en cada rama
 
 - Push o Pull Request hacia `dev`: unitarios, integración, compilación y E2E.
-- Push a `main`: pasa las pruebas, construye `karciss/dudamapa` para `linux/amd64`, publica `latest` y el SHA, aplica Terraform y ejecuta Ansible.
+- Push a `main`: pasa las pruebas, construye `${DOCKERHUB_USERNAME}/dudamapa` para `linux/amd64`, publica `latest` y el SHA, aplica Terraform y ejecuta Ansible.
 - Ansible instala Docker, Git, UFW/iptables, XFCE y TigerVNC; despliega la imagen de Docker Hub.
 - VNC escucha solo en loopback de la VM. Para conectarlo desde tu computadora:
 
@@ -58,4 +58,3 @@ El backend remoto usa la clave `dudamapa/terraform.tfstate` dentro del bucket, s
 El Compose de producción inicia `cloudflared tunnel --url http://app:3000`. Cloudflare publica una URL temporal aleatoria `https://....trycloudflare.com`; Ansible la muestra en el registro del job. No hace falta comprar dominio ni crear una cuenta Cloudflare. La URL es para demostraciones: al detener o reiniciar el túnel puede cambiar y la anterior deja de responder. La IP pública de OCI continúa disponible aparte en `terraform output public_url`.
 
 Para una URL fija se necesita un dominio agregado a Cloudflare y un túnel administrado con credenciales. Esa opción se deja como futura variable, no se inventa ni se configura sin dominio. Quick Tunnels no ofrecen garantía de disponibilidad y Cloudflare los destina a pruebas y desarrollo.
-
