@@ -1,0 +1,6 @@
+region           = "sa-santiago-1"
+tenancy_ocid     = "ocid1.tenancy.oc1..REEMPLAZAR"
+compartment_ocid = "ocid1.compartment.oc1..REEMPLAZAR"
+ssh_public_key   = "ssh-ed25519 REEMPLAZAR"
+ssh_allowed_cidr = "203.0.113.10/32"
+# image_ocid = "ocid1.image.oc1..REEMPLAZAR"

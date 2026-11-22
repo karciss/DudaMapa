@@ -1,0 +1,48 @@
+services:
+  app:
+    image: ${DOCKERHUB_USERNAME}/dudamapa:${IMAGE_TAG}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DB_FILE: /app/backend/data/dudamapa.sqlite
+    expose:
+      - "3000"
+    volumes:
+      - dudamapa_data:/app/backend/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  proxy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      SITE_DOMAIN: ${SITE_DOMAIN:-:80}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  cloudflare:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate --url http://app:3000
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+
+volumes:
+  dudamapa_data:
+  caddy_data:
+  caddy_config:

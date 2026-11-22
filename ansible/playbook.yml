@@ -1,0 +1,262 @@
+---
+- name: Preparar VM Ubuntu 24.04 y desplegar DudaMapa
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    deploy_dir: /opt/dudamapa
+    site_domain: "{{ lookup('ansible.builtin.env', 'SITE_DOMAIN') | default(':80', true) }}"
+    dockerhub_username: "{{ lookup('ansible.builtin.env', 'DOCKERHUB_USERNAME') }}"
+    dockerhub_token: "{{ lookup('ansible.builtin.env', 'DOCKERHUB_TOKEN') }}"
+    image_tag: "{{ lookup('ansible.builtin.env', 'IMAGE_TAG') | default('latest', true) }}"
+    ssh_allowed_cidr: "{{ lookup('ansible.builtin.env', 'SSH_ALLOWED_CIDR') | default('0.0.0.0/0', true) }}"
+    vnc_password: "{{ lookup('ansible.builtin.env', 'VNC_PASSWORD') }}"
+    vnc_user: ubuntu
+
+  pre_tasks:
+    - name: Esperar a que Ubuntu acepte SSH
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Verificar que la imagen sea Ubuntu 24.04 o superior
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['distribution'] == 'Ubuntu'
+          - ansible_facts['distribution_version'] is version('24.04', '>=')
+        fail_msg: La VM debe ejecutar Ubuntu 24.04.
+
+    - name: Verificar variables de despliegue
+      ansible.builtin.assert:
+        that:
+          - dockerhub_username | length > 0
+          - dockerhub_token | length > 0
+          - vnc_password | length >= 8
+        fail_msg: Configura Docker Hub y VNC_PASSWORD en GitHub Actions (mínimo 8 caracteres para VNC).
+      no_log: true
+
+    - name: Actualizar la caché de APT
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Instalar herramientas del sistema, firewall y escritorio VNC
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - git
+          - ufw
+          - iptables
+          - xfce4
+          - xfce4-goodies
+          - dbus-x11
+          - tigervnc-standalone-server
+        state: present
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+  tasks:
+    - name: Crear carpeta de llaves APT
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Descargar la llave del repositorio oficial de Docker
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: '0644'
+
+    - name: Registrar el repositorio oficial de Docker
+      ansible.builtin.apt_repository:
+        repo: "deb [arch={{ 'arm64' if ansible_facts['architecture'] == 'aarch64' else 'amd64' }} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_facts['distribution_release'] }} stable"
+        filename: docker
+        state: present
+
+    - name: Instalar Docker Engine y Docker Compose
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    - name: Habilitar Docker al iniciar la VM
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Permitir SSH desde el runner de GitHub Actions
+      community.general.ufw:
+        rule: allow
+        port: '22'
+        proto: tcp
+        from_ip: "{{ ssh_allowed_cidr }}"
+
+    - name: Permitir tráfico HTTP y HTTPS
+      community.general.ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop: ['80', '443']
+
+    - name: Activar firewall con política entrante restrictiva
+      community.general.ufw:
+        state: enabled
+        policy: deny
+        direction: incoming
+
+    - name: Consultar las reglas de iptables generadas por UFW
+      ansible.builtin.command: iptables -S ufw-user-input
+      register: reglas_iptables
+      changed_when: false
+
+    - name: Confirmar que iptables permite HTTP y HTTPS
+      ansible.builtin.assert:
+        that:
+          - "('--dport ' ~ item) in reglas_iptables.stdout"
+        fail_msg: "Falta la regla de iptables para el puerto {{ item }}."
+      loop: ['80', '443']
+
+    - name: Crear carpeta protegida para TigerVNC
+      ansible.builtin.file:
+        path: "/home/{{ vnc_user }}/.vnc"
+        state: directory
+        owner: "{{ vnc_user }}"
+        group: "{{ vnc_user }}"
+        mode: '0700'
+
+    - name: Guardar contraseña VNC protegida
+      ansible.builtin.shell: "printf '%s\\n' \"$VNC_PASSWORD\" | vncpasswd -f > /home/{{ vnc_user }}/.vnc/passwd"
+      args:
+        executable: /bin/bash
+      environment:
+        VNC_PASSWORD: "{{ vnc_password }}"
+      no_log: true
+      changed_when: true
+
+    - name: Proteger archivo de contraseña VNC
+      ansible.builtin.file:
+        path: "/home/{{ vnc_user }}/.vnc/passwd"
+        owner: "{{ vnc_user }}"
+        group: "{{ vnc_user }}"
+        mode: '0600'
+
+    - name: Configurar XFCE como escritorio remoto
+      ansible.builtin.copy:
+        dest: "/home/{{ vnc_user }}/.vnc/xstartup"
+        owner: "{{ vnc_user }}"
+        group: "{{ vnc_user }}"
+        mode: '0755'
+        content: |
+          #!/bin/sh
+          unset SESSION_MANAGER
+          unset DBUS_SESSION_BUS_ADDRESS
+          exec startxfce4
+
+    - name: Definir el servicio VNC solo accesible por túnel SSH
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/dudamapa-vnc.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=Escritorio VNC local para DudaMapa
+          After=network.target
+
+          [Service]
+          Type=forking
+          User={{ vnc_user }}
+          WorkingDirectory=/home/{{ vnc_user }}
+          Environment=HOME=/home/{{ vnc_user }}
+          PIDFile=/home/{{ vnc_user }}/.vnc/%H:1.pid
+          ExecStart=/usr/bin/tigervncserver :1 -localhost yes -geometry 1280x800 -depth 24
+          ExecStop=/usr/bin/tigervncserver -kill :1
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Reiniciar VNC
+
+    - name: Crear carpeta de despliegue
+      ansible.builtin.file:
+        path: "{{ deploy_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Copiar Compose de producción
+      ansible.builtin.copy:
+        src: ../compose.deploy.yaml
+        dest: "{{ deploy_dir }}/compose.yaml"
+        mode: '0644'
+
+    - name: Copiar configuración del proxy Caddy
+      ansible.builtin.copy:
+        src: ../Caddyfile
+        dest: "{{ deploy_dir }}/Caddyfile"
+        mode: '0644'
+
+    - name: Iniciar sesión en Docker Hub
+      ansible.builtin.shell: "printf '%s' \"$DOCKERHUB_TOKEN\" | docker login --username \"$DOCKERHUB_USERNAME\" --password-stdin"
+      args:
+        executable: /bin/bash
+      environment:
+        DOCKERHUB_USERNAME: "{{ dockerhub_username }}"
+        DOCKERHUB_TOKEN: "{{ dockerhub_token }}"
+      no_log: true
+      changed_when: true
+
+    - name: Guardar variables del despliegue
+      ansible.builtin.copy:
+        dest: "{{ deploy_dir }}/.env"
+        mode: '0600'
+        content: |
+          DOCKERHUB_USERNAME={{ dockerhub_username }}
+          IMAGE_TAG={{ image_tag }}
+          SITE_DOMAIN={{ site_domain }}
+
+    - name: Habilitar VNC local por SSH
+      ansible.builtin.systemd:
+        name: dudamapa-vnc.service
+        daemon_reload: true
+        state: started
+        enabled: true
+
+    - name: Descargar imagen publicada en Docker Hub
+      ansible.builtin.command: docker compose pull
+      args:
+        chdir: "{{ deploy_dir }}"
+      changed_when: true
+
+    - name: Desplegar DudaMapa sin compilar en la VM
+      ansible.builtin.command: docker compose up -d --no-build --remove-orphans
+      args:
+        chdir: "{{ deploy_dir }}"
+      changed_when: true
+
+    - name: Esperar a que Cloudflare asigne la URL gratuita de demostración
+      ansible.builtin.command: docker compose logs --no-color --since 2m cloudflare
+      args:
+        chdir: "{{ deploy_dir }}"
+      register: cloudflare_tunnel_logs
+      retries: 18
+      delay: 5
+      until: "'trycloudflare.com' in cloudflare_tunnel_logs.stdout"
+      changed_when: false
+
+    - name: Mostrar la URL temporal de Cloudflare en el registro de Actions
+      ansible.builtin.debug:
+        msg: "URL gratuita para la demostración: {{ (cloudflare_tunnel_logs.stdout | regex_findall('https://[A-Za-z0-9-]+\\.trycloudflare\\.com')) | last }}"
+
+  handlers:
+    - name: Reiniciar VNC
+      ansible.builtin.systemd:
+        name: dudamapa-vnc.service
+        daemon_reload: true
+        state: restarted

@@ -1,0 +1,216 @@
+name: Pipeline DudaMapa
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dudamapa-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  pruebas:
+    name: Pruebas automatizadas
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v5
+
+      - name: Preparar Node.js 24
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci --no-audit --no-fund
+
+      - name: Ejecutar pruebas unitarias
+        run: npm run test:unit
+
+      - name: Ejecutar pruebas de integración
+        run: npm run test:integration
+
+      - name: Compilar frontend
+        run: npm run build
+
+      - name: Preparar Python para comprobar Ansible
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Instalar Ansible y la colección del firewall
+        run: |
+          python -m pip install ansible-core
+          ansible-galaxy collection install -r ansible/requirements.yml
+
+      - name: Comprobar sintaxis de Ansible
+        run: ansible-playbook -i localhost, --syntax-check ansible/playbook.yml
+
+      - name: Instalar Chromium para Playwright
+        run: npx playwright install --with-deps chromium
+
+      - name: Ejecutar pruebas E2E
+        run: npm run test:e2e
+
+      - name: Guardar evidencia de Playwright si falla
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidencia-playwright
+          path: test-results/
+          if-no-files-found: ignore
+
+  publicar-imagen:
+    name: Publicar imagen en Docker Hub
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: pruebas
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v5
+
+      - name: Validar secretos de Docker Hub
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          test -n "$DOCKERHUB_USERNAME" && test -n "$DOCKERHUB_TOKEN" || {
+            echo 'Faltan los secretos DOCKERHUB_USERNAME o DOCKERHUB_TOKEN.'
+            exit 1
+          }
+
+      - name: Preparar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Iniciar sesión en Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Construir y publicar imagen
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/dudamapa:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/dudamapa:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  desplegar:
+    name: Terraform OCI y configuración Ansible
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: publicar-imagen
+    runs-on: ubuntu-latest
+    environment: produccion
+    env:
+      OCI_REGION: ${{ vars.OCI_REGION }}
+      OCI_TENANCY_OCID: ${{ secrets.OCI_TENANCY_OCID }}
+      OCI_USER_OCID: ${{ secrets.OCI_USER_OCID }}
+      OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+      OCI_STATE_BUCKET: ${{ vars.OCI_STATE_BUCKET }}
+      OCI_NAMESPACE: ${{ vars.OCI_NAMESPACE }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      IMAGE_TAG: ${{ github.sha }}
+      SITE_DOMAIN: ${{ vars.SITE_DOMAIN != '' && vars.SITE_DOMAIN || ':80' }}
+      TF_VAR_region: ${{ vars.OCI_REGION }}
+      TF_VAR_tenancy_ocid: ${{ secrets.OCI_TENANCY_OCID }}
+      TF_VAR_compartment_ocid: ${{ secrets.OCI_COMPARTMENT_OCID }}
+      TF_VAR_ssh_public_key: ${{ secrets.VM_SSH_PUBLIC_KEY }}
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v5
+
+      - name: Validar secretos y variables para OCI y VM
+        env:
+          OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+          VM_SSH_PRIVATE_KEY: ${{ secrets.VM_SSH_PRIVATE_KEY }}
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+        run: |
+          for value in "$OCI_REGION" "$OCI_TENANCY_OCID" "$OCI_USER_OCID" "$OCI_FINGERPRINT" \
+            "$TF_VAR_compartment_ocid" "$TF_VAR_ssh_public_key" "$OCI_STATE_BUCKET" "$OCI_NAMESPACE" \
+            "$OCI_PRIVATE_KEY" "$VM_SSH_PRIVATE_KEY" "$VNC_PASSWORD"; do
+            test -n "$value" || { echo 'Falta una variable o secreto requerido de OCI, SSH o VNC.'; exit 1; }
+          done
+          test "${#VNC_PASSWORD}" -ge 8 || { echo 'VNC_PASSWORD debe tener al menos 8 caracteres.'; exit 1; }
+          printf '%s\n' "$OCI_PRIVATE_KEY" > "$RUNNER_TEMP/oci_api_key.pem"
+          printf '%s\n' "$VM_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/vm_ssh_key"
+          chmod 600 "$RUNNER_TEMP/oci_api_key.pem" "$RUNNER_TEMP/vm_ssh_key"
+          echo "OCI_PRIVATE_KEY_PATH=$RUNNER_TEMP/oci_api_key.pem" >> "$GITHUB_ENV"
+
+      - name: Restringir SSH a este runner
+        run: |
+          RUNNER_IP=$(curl --fail --silent --show-error https://api.ipify.org)
+          echo "TF_VAR_ssh_allowed_cidr=$RUNNER_IP/32" >> "$GITHUB_ENV"
+          echo "SSH_ALLOWED_CIDR=$RUNNER_IP/32" >> "$GITHUB_ENV"
+
+      - name: Preparar Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.16.6'
+
+      - name: Inicializar estado remoto de Terraform en OCI Object Storage
+        run: |
+          terraform -chdir=infra/terraform init -input=false \
+            -backend-config="bucket=$OCI_STATE_BUCKET" \
+            -backend-config="namespace=$OCI_NAMESPACE" \
+            -backend-config="key=dudamapa/terraform.tfstate" \
+            -backend-config="region=$OCI_REGION" \
+            -backend-config="tenancy_ocid=$OCI_TENANCY_OCID" \
+            -backend-config="user_ocid=$OCI_USER_OCID" \
+            -backend-config="fingerprint=$OCI_FINGERPRINT" \
+            -backend-config="private_key_path=$OCI_PRIVATE_KEY_PATH"
+
+      - name: Validar configuración de Terraform
+        run: terraform -chdir=infra/terraform validate
+
+      - name: Crear o actualizar VCN, subredes y VM Ubuntu 24.04
+        run: terraform -chdir=infra/terraform apply -input=false -auto-approve
+
+      - name: Obtener IP pública de la VM
+        id: vm
+        run: echo "ip=$(terraform -chdir=infra/terraform output -raw public_ip)" >> "$GITHUB_OUTPUT"
+
+      - name: Preparar Python y Ansible
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Instalar Ansible y su colección de firewall
+        run: |
+          python -m pip install ansible-core
+          ansible-galaxy collection install -r ansible/requirements.yml
+
+      - name: Configurar Docker, Git, firewall, iptables, VNC y desplegar
+        env:
+          ANSIBLE_SSH_COMMON_ARGS: '-o StrictHostKeyChecking=accept-new'
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+        run: |
+          ansible-playbook -i '${{ steps.vm.outputs.ip }},' \
+            --private-key "$RUNNER_TEMP/vm_ssh_key" ansible/playbook.yml
+
+      - name: Comprobar que DudaMapa responde en la VM
+        env:
+          PUBLIC_IP: ${{ steps.vm.outputs.ip }}
+        run: |
+          if [ "$SITE_DOMAIN" = ':80' ]; then
+            URL="http://$PUBLIC_IP/api/health"
+          else
+            URL="https://$SITE_DOMAIN/api/health"
+          fi
+          for attempt in {1..12}; do
+            if curl --fail --silent --show-error "$URL"; then exit 0; fi
+            sleep 10
+          done
+          echo 'La aplicación no respondió por HTTP/HTTPS después del despliegue.' >&2
+          exit 1

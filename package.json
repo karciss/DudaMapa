@@ -1,0 +1,20 @@
+{
+  "name": "dudamapa",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MVP colaborativo para visualizar y resolver dudas académicas recurrentes.",
+  "workspaces": ["frontend", "backend"],
+  "scripts": {
+    "dev": "concurrently -k -n API,WEB -c cyan,magenta \"npm:dev --workspace backend\" \"npm:dev --workspace frontend\"",
+    "build": "npm run build --workspace frontend",
+    "start": "npm run start --workspace backend",
+    "test:unit": "npm run test:unit --workspace backend && npm run test:unit --workspace frontend",
+    "test:integration": "npm run test:integration --workspace backend",
+    "test:e2e": "playwright test",
+    "test": "npm run test:unit && npm run test:integration && npm run test:e2e"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "concurrently": "^9.2.1"
+  }
+}

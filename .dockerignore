@@ -1,0 +1,12 @@
+.git
+.github
+node_modules
+**/node_modules
+**/coverage
+**/playwright-report
+**/test-results
+terraform/.terraform
+terraform/*.tfstate*
+ansible/.vault_pass
+.env
+*.md
