@@ -241,7 +241,7 @@
       changed_when: true
 
     - name: Esperar a que Cloudflare asigne la URL gratuita de demostración
-      ansible.builtin.command: docker compose logs --no-color --since 2m cloudflare
+      ansible.builtin.command: docker compose logs --no-color --tail 1000 cloudflare
       args:
         chdir: "{{ deploy_dir }}"
       register: cloudflare_tunnel_logs
