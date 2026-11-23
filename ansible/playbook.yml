@@ -91,12 +91,11 @@
         state: started
         enabled: true
 
-    - name: Permitir SSH desde el runner de GitHub Actions
+    - name: Permitir SSH dentro de la VM; la lista de seguridad OCI limita el origen
       community.general.ufw:
         rule: allow
         port: '22'
         proto: tcp
-        from_ip: "{{ ssh_allowed_cidr }}"
 
     - name: Permitir tráfico HTTP y HTTPS
       community.general.ufw:
