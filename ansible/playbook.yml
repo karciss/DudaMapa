@@ -239,19 +239,25 @@
         chdir: "{{ deploy_dir }}"
       changed_when: true
 
+    - name: Iniciar el túnel temporal de Cloudflare
+      ansible.builtin.command: docker compose up -d cloudflare
+      args:
+        chdir: "{{ deploy_dir }}"
+      changed_when: true
+
     - name: Esperar a que Cloudflare asigne la URL gratuita de demostración
-      ansible.builtin.command: docker compose logs --no-color --tail 1000 cloudflare
+      ansible.builtin.command: docker compose logs --no-color --tail 100 cloudflare
       args:
         chdir: "{{ deploy_dir }}"
       register: cloudflare_tunnel_logs
       retries: 18
       delay: 5
-      until: "'trycloudflare.com' in cloudflare_tunnel_logs.stdout"
+      until: (cloudflare_tunnel_logs.stdout | regex_findall('https://[A-Za-z0-9-]+\\.trycloudflare\\.com') | length) > 0
       changed_when: false
 
     - name: Mostrar la URL temporal de Cloudflare en el registro de Actions
       ansible.builtin.debug:
-        msg: "URL gratuita para la demostración: {{ (cloudflare_tunnel_logs.stdout | regex_findall('https://[A-Za-z0-9-]+\\.trycloudflare\\.com')) | last }}"
+        msg: "URL gratuita para la demostración: {{ (cloudflare_tunnel_logs.stdout | regex_findall('https://[A-Za-z0-9-]+\\.trycloudflare\\.com')) | first }}"
 
   handlers:
     - name: Reiniciar VNC
